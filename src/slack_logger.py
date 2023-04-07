@@ -4,29 +4,51 @@ import csv
 import json
 import boto3
 import requests
+from datetime import datetime
+from typing import List, Dict, Union
+from pydantic import BaseModel
+
+
+class LogMessage(BaseModel):
+    message: str
+    severity: str
+    source: str
+    timestamp: datetime
+        
+class SlackMessage(BaseModel):
+    text: str
+    blocks: List[Dict[str, Union[str, List[Dict[str, Union[str, str]]]]]]
+    attachments: List[Dict[str, Union[str, List[Dict[str, Union[str, str]]]]]] = []
+
 
 
 class SlackLogger:
-    def __init__(self, log_group_name, filter_pattern):
+    def __init__(self, log_group_name: str, filter_pattern: str):
         self.log_group_name = log_group_name
         self.filter_pattern = filter_pattern
         self.client = boto3.client("logs")
 
-    def get_log_messages(self, start_time, end_time):
+    def get_log_messages(self, start_time: datetime, end_time: datetime) -> List[LogMessage]:
         response = self.client.filter_log_events(
             logGroupName=self.log_group_name,
-            startTime=start_time,
-            endTime=end_time,
+            startTime=int(start_time.timestamp() * 1000),
+            endTime=int(end_time.timestamp() * 1000),
             filterPattern=self.filter_pattern
         )
-        return response["events"]
+        return [
+            LogMessage(
+                message=json.loads(event["message"])["message"],
+                severity=json.loads(event["message"])["severity"],
+                source=json.loads(event["message"])["logger"]["name"],
+                timestamp=datetime.fromtimestamp(event["timestamp"] / 1000)
+            ) for event in response["events"]
+        ]
 
-    def format_slack_message(self, log_message, include_csv):
-        message = json.loads(log_message["message"])
-        severity = message["severity"]
-        source = message["logger"]["name"]
-        message_text = message["message"]
-        timestamp = log_message["timestamp"]
+    def format_slack_message(self, log_message: LogMessage, include_csv: bool) -> SlackMessage
+        severity = log_message.severity
+        source = log_message.source
+        message_text = log_message.message
+        timestamp = log_message.timestamp
         pretty_timestamp = timestamp.strftime("%Y-%m-%d %H:%M:%S")
         slack_message = {
             "text": f"{pretty_timestamp}\n{message_text}",
@@ -42,7 +64,7 @@ class SlackLogger:
             ]
         }
         if include_csv:
-            log_event = log_message["message"].strip().replace('\n', ' ')
+            log_event = log_message.message.strip().replace('\n', ' ')
             csv_message = [timestamp.isoformat(), severity, source, log_event]
             slack_message["attachments"] = [
                 {
@@ -59,7 +81,7 @@ class SlackLogger:
             slack_message["attachments"][0]["text"] = self.get_csv_message([csv_message])
         return slack_message
 
-    def get_csv_message(self, messages):
+    def get_csv_message(self, messages: List[List[str]]) -> str:
         file = io.StringIO()
         writer = csv.writer(file)
         writer.writerow(["Timestamp", "Severity", "Source", "Message"])
@@ -67,9 +89,11 @@ class SlackLogger:
             writer.writerow(message)
         return file.getvalue()
 
-    def post_to_slack(self, slack_webhook_url, messages):
+    def post_to_slack(self, slack_webhook_url: str, messages: List[LogMessage]) -> None:
         for message in messages:
-            response = requests.post(slack_webhook_url, json=message)
+            response = requests.post(slack_webhook_url,
+                                     json=message,
+                                     headers={"Content-Type": "application/json"})
             if response.status_code != 200:
                 raise ValueError("Failed to post to Slack")
 
